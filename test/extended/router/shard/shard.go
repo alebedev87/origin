@@ -22,6 +22,10 @@ type Config struct {
 	// Type is the matchSelector
 	Type string
 
+	// Replicas optionally sets the number of router replicas.
+	// If 0, defaults to 1.
+	Replicas int32
+
 	// LoadBalancer optionally specifies LoadBalancerStrategy parameters.
 	// If nil, the default LoadBalancer configuration is used.
 	LoadBalancer *operatorv1.LoadBalancerStrategy
@@ -44,8 +48,13 @@ func DeployNewRouterShard(oc *exutil.CLI, timeout time.Duration, cfg Config) (*o
 			},
 		},
 		Spec: operatorv1.IngressControllerSpec{
-			Replicas: utilpointer.Int32(1),
-			Domain:   cfg.Domain,
+			Replicas: func() *int32 {
+				if cfg.Replicas > 0 {
+					return utilpointer.Int32(cfg.Replicas)
+				}
+				return utilpointer.Int32(1)
+			}(),
+			Domain: cfg.Domain,
 			EndpointPublishingStrategy: &operatorv1.EndpointPublishingStrategy{
 				Type:         operatorv1.LoadBalancerServiceStrategyType,
 				LoadBalancer: cfg.LoadBalancer,
