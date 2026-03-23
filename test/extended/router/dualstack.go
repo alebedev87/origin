@@ -97,12 +97,16 @@ var _ = g.Describe("[sig-network-edge][OCPFeatureGate:AWSDualStackInstall][Featu
 			oc.AdminKubeClient().CoreV1().Pods(ns).Delete(ctx, execPod.Name, *metav1.NewDeleteOptions(1))
 		}()
 
+		g.By("Waiting for DNS resolution of the route host")
+		err = waitForDNSResolution(ns, execPod.Name, routeHost, 10*time.Minute)
+		o.Expect(err).NotTo(o.HaveOccurred(), "DNS resolution failed")
+
 		g.By("Verifying route is reachable over IPv4")
-		err = waitForRouteResponse(ns, execPod.Name, routeHost, "-4", 10*time.Minute)
+		err = waitForRouteResponse(ns, execPod.Name, routeHost, "-4", 5*time.Minute)
 		o.Expect(err).NotTo(o.HaveOccurred(), "route not reachable over IPv4")
 
 		g.By("Verifying route is reachable over IPv6")
-		err = waitForRouteResponse(ns, execPod.Name, routeHost, "-6", 10*time.Minute)
+		err = waitForRouteResponse(ns, execPod.Name, routeHost, "-6", 5*time.Minute)
 		o.Expect(err).NotTo(o.HaveOccurred(), "route not reachable over IPv6")
 	})
 
@@ -164,8 +168,12 @@ var _ = g.Describe("[sig-network-edge][OCPFeatureGate:AWSDualStackInstall][Featu
 			oc.AdminKubeClient().CoreV1().Pods(ns).Delete(ctx, execPod.Name, *metav1.NewDeleteOptions(1))
 		}()
 
+		g.By("Waiting for DNS resolution of the route host")
+		err = waitForDNSResolution(ns, execPod.Name, routeHost, 10*time.Minute)
+		o.Expect(err).NotTo(o.HaveOccurred(), "DNS resolution failed")
+
 		g.By("Verifying route is reachable over IPv4")
-		err = waitForRouteResponse(ns, execPod.Name, routeHost, "-4", 10*time.Minute)
+		err = waitForRouteResponse(ns, execPod.Name, routeHost, "-4", 5*time.Minute)
 		o.Expect(err).NotTo(o.HaveOccurred(), "route not reachable over IPv4")
 	})
 })
@@ -293,19 +301,46 @@ func waitForRouteAdmitted(ctx context.Context, oc *exutil.CLI, ns, name, host st
 	o.Expect(err).NotTo(o.HaveOccurred(), "route was not admitted")
 }
 
-func waitForRouteResponse(ns, execPodName, host, ipFlag string, timeout time.Duration) error {
-	curlCmd := fmt.Sprintf("curl %s -k -v -m 10 --connect-timeout 5 -o /dev/null https://%s 2>&1", ipFlag, host)
+func waitForDNSResolution(ns, execPodName, host string, timeout time.Duration) error {
+	cmd := fmt.Sprintf("getent hosts %s", host)
 	var lastOutput string
-	err := wait.PollImmediate(5*time.Second, timeout, func() (bool, error) {
-		output, err := e2eoutput.RunHostCmd(ns, execPodName, curlCmd)
+	err := wait.PollImmediate(10*time.Second, timeout, func() (bool, error) {
+		output, err := e2eoutput.RunHostCmd(ns, execPodName, cmd)
 		lastOutput = output
 		if err != nil {
 			return false, nil
 		}
-		if strings.Contains(output, "< HTTP/1.1 200") || strings.Contains(output, "< HTTP/2 200") {
-			e2e.Logf("curl %s %s:\n%s", ipFlag, host, output)
-			return true, nil
+		e2e.Logf("DNS resolution for %s:\n%s", host, strings.TrimSpace(output))
+		return true, nil
+	})
+	if err != nil {
+		return fmt.Errorf("DNS resolution for %s timed out, last output: %s", host, lastOutput)
+	}
+	return nil
+}
+
+func waitForRouteResponse(ns, execPodName, host, ipFlag string, timeout time.Duration) error {
+	curlCmd := fmt.Sprintf("curl %s -k -v -m 10 --connect-timeout 5 -o /dev/null https://%s 2>&1", ipFlag, host)
+	var lastOutput string
+	consecutiveSuccesses := 0
+	requiredSuccesses := 3
+	err := wait.PollImmediate(10*time.Second, timeout, func() (bool, error) {
+		output, err := e2eoutput.RunHostCmd(ns, execPodName, curlCmd)
+		lastOutput = output
+		if err != nil {
+			consecutiveSuccesses = 0
+			return false, nil
 		}
+		if strings.Contains(output, "< HTTP/1.1 200") || strings.Contains(output, "< HTTP/2 200") {
+			consecutiveSuccesses++
+			e2e.Logf("curl %s %s: success (%d/%d)", ipFlag, host, consecutiveSuccesses, requiredSuccesses)
+			if consecutiveSuccesses >= requiredSuccesses {
+				e2e.Logf("curl %s %s:\n%s", ipFlag, host, output)
+				return true, nil
+			}
+			return false, nil
+		}
+		consecutiveSuccesses = 0
 		return false, nil
 	})
 	if err != nil {
